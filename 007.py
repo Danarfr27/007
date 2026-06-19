@@ -7,14 +7,15 @@ import winsound
 import json
 import subprocess
 import random
+import math
 from pathlib import Path
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QFrame, QTreeWidget, QTreeWidgetItem,
                              QSystemTrayIcon, QMenu, QAction, QMessageBox, QPushButton,
                              QSplitter, QInputDialog, QLineEdit, QTextEdit)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
-from PyQt5.QtGui import QFont, QColor, QPalette
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QSize
+from PyQt5.QtGui import QFont, QColor, QPalette, QImage, QPixmap, QPainter, QPen, QPolygon, QBrush
 
 # ============================================
 # CONFIGURATION
@@ -30,7 +31,8 @@ def load_config():
         "sound_enabled": True, 
         "theme": "green",
         "show_hidden": False,
-        "confirm_delete": True
+        "confirm_delete": True,
+        "camera_enabled": True
     }
 
 def save_config(config):
@@ -159,18 +161,17 @@ class USBMonitor(QThread):
         self.running = False
 
 # ============================================
-# LIVE SCANNER - James Bond Style Continuous Scan
+# LIVE SCANNER
 # ============================================
 class LiveScanner(QThread):
-    file_found = pyqtSignal(str, str, str, str, str)  # path, name, type, size, status
-    scan_progress = pyqtSignal(int, str)  # progress, message
+    file_found = pyqtSignal(str, str, str, str, str)
+    scan_progress = pyqtSignal(int, str)
     scan_complete = pyqtSignal()
 
     def __init__(self, drive_letter):
         super().__init__()
         self.drive_letter = drive_letter
         self.running = True
-        self.scanned_paths = set()
         self.total_files = 0
 
     def get_file_type(self, ext):
@@ -204,55 +205,37 @@ class LiveScanner(QThread):
         drive_path = f"{self.drive_letter}\\"
         if not os.path.exists(drive_path):
             return
-
-        # Phase 1: Quick scan - emit files one by one with delay (James Bond effect)
         self.scan_folder_live(drive_path, 0)
-
-        # Phase 2: Continuous "monitoring" loop
         loop_count = 0
         while self.running:
             loop_count += 1
             progress = min(70 + (loop_count % 30), 99)
             messages = [
-                "Monitoring file integrity...",
-                "Scanning for new files...",
-                "Verifying checksums...",
-                "Cross-referencing database...",
-                "Analyzing metadata...",
-                "Checking permissions...",
-                "Indexing contents...",
-                "Decrypting headers...",
+                "Monitoring file integrity...", "Scanning for new files...",
+                "Verifying checksums...", "Cross-referencing database...",
+                "Analyzing metadata...", "Checking permissions...",
+                "Indexing contents...", "Decrypting headers...",
             ]
             msg = messages[loop_count % len(messages)]
             self.scan_progress.emit(progress, msg)
             time.sleep(0.8)
-
         self.scan_complete.emit()
 
     def scan_folder_live(self, path, depth):
-        """Scan folder and emit files one by one with typing effect delay"""
         if depth > 3 or not self.running:
             return
-
         try:
             items = sorted(os.listdir(path))
             for item in items:
                 if not self.running:
                     return
-
                 item_path = os.path.join(path, item)
                 is_dir = os.path.isdir(item_path)
-
                 if item.startswith('.'):
                     continue
-
                 self.total_files += 1
-
                 if is_dir:
-                    self.file_found.emit(
-                        item_path, item, "FOLDER", "-", "[DIR]"
-                    )
-                    # Recursive scan with delay
+                    self.file_found.emit(item_path, item, "FOLDER", "-", "[DIR]")
                     self.scan_folder_live(item_path, depth + 1)
                 else:
                     try:
@@ -260,26 +243,15 @@ class LiveScanner(QThread):
                         ext = Path(item).suffix.lower()
                         file_type = self.get_file_type(ext)
                         size = self.format_size(stat.st_size)
-                        mtime = time.ctime(stat.st_mtime)[:16]
-
-                        # Random "security status"
                         statuses = ["VERIFIED", "SCANNED", "CHECKED", "CLEARED", "APPROVED"]
                         status = random.choice(statuses)
-
-                        self.file_found.emit(
-                            item_path, item, file_type, size, status
-                        )
+                        self.file_found.emit(item_path, item, file_type, size, status)
                     except:
                         pass
-
-                # James Bond typing effect - small delay between files
                 if self.total_files % 5 == 0:
                     time.sleep(0.05)
-
-                # Update progress
                 progress = min(int((self.total_files / 50) * 70), 70)
                 self.scan_progress.emit(progress, f"Analyzing: {item[:30]}...")
-
         except PermissionError:
             pass
         except Exception as e:
@@ -289,9 +261,341 @@ class LiveScanner(QThread):
         self.running = False
 
 # ============================================
-# BIN V7.4 - James Bond Live Scanner
+# AGENT FACE SCANNER - Line Grid with Feature Points
 # ============================================
-class BIN_V73(QMainWindow):
+class AgentFaceScanner(QThread):
+    frame_ready = pyqtSignal(QImage)
+    face_detected = pyqtSignal(bool, int, int, int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.running = True
+        self.camera_enabled = True
+        self.cap = None
+        self.scan_line_y = 0
+        self.scan_direction = 1
+
+    def init_camera(self):
+        try:
+            import cv2
+            self.cap = cv2.VideoCapture(0)
+            if not self.cap.isOpened():
+                print("Camera not available")
+                return False
+            return True
+        except ImportError:
+            print("OpenCV not installed. Run: pip install opencv-python")
+            return False
+        except Exception as e:
+            print(f"Camera init error: {e}")
+            return False
+
+    def draw_line_grid(self, frame, face_x, face_y, face_w, face_h):
+        """Draw light green line grid overlay like agent face scan"""
+        import cv2
+        import numpy as np
+        h, w = frame.shape[:2]
+        overlay = frame.copy()
+
+        # Light green color
+        line_color = (144, 238, 144)  # Light green BGR
+        bright_color = (0, 255, 170)  # Bright green BGR
+
+        # Grid spacing
+        grid_spacing = 25
+
+        # Draw horizontal lines
+        for y in range(0, h, grid_spacing):
+            alpha = 0.3 if y % (grid_spacing * 2) == 0 else 0.15
+            cv2.line(overlay, (0, y), (w, y), line_color, 1)
+
+        # Draw vertical lines
+        for x in range(0, w, grid_spacing):
+            alpha = 0.3 if x % (grid_spacing * 2) == 0 else 0.15
+            cv2.line(overlay, (x, 0), (x, h), line_color, 1)
+
+        # Blend overlay
+        cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
+
+        # If face detected, draw feature extraction lines
+        if face_w > 0 and face_h > 0:
+            self.draw_feature_extraction(frame, face_x, face_y, face_w, face_h)
+        else:
+            # No face - just scanning text
+            cv2.putText(frame, "[SCANNING FOR TARGET...]", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, bright_color, 1)
+
+        # Animated scan line
+        self.scan_line_y += 2 * self.scan_direction
+        if self.scan_line_y >= h:
+            self.scan_direction = -1
+        elif self.scan_line_y <= 0:
+            self.scan_direction = 1
+
+        cv2.line(frame, (0, self.scan_line_y), (w, self.scan_line_y), bright_color, 2)
+
+        return frame
+
+    def draw_feature_extraction(self, frame, fx, fy, fw, fh):
+        """Draw feature extraction lines and points on face like agent scan"""
+        import cv2
+        import numpy as np
+
+        bright_color = (0, 255, 170)  # Bright green
+        dim_color = (0, 100, 80)      # Dim green
+
+        # Calculate face feature points
+        # Eyes (left and right)
+        left_eye_x = int(fx + fw * 0.3)
+        left_eye_y = int(fy + fh * 0.35)
+        right_eye_x = int(fx + fw * 0.7)
+        right_eye_y = int(fy + fh * 0.35)
+
+        # Nose
+        nose_x = int(fx + fw * 0.5)
+        nose_y = int(fy + fh * 0.55)
+
+        # Mouth
+        mouth_x = int(fx + fw * 0.5)
+        mouth_y = int(fy + fh * 0.75)
+
+        # Jaw points
+        jaw_left_x = int(fx + fw * 0.15)
+        jaw_left_y = int(fy + fh * 0.85)
+        jaw_right_x = int(fx + fw * 0.85)
+        jaw_right_y = int(fy + fh * 0.85)
+        jaw_bottom_x = int(fx + fw * 0.5)
+        jaw_bottom_y = int(fy + fh * 0.95)
+
+        # Forehead top
+        forehead_x = int(fx + fw * 0.5)
+        forehead_y = int(fy + fh * 0.15)
+
+        # Cheeks
+        cheek_left_x = int(fx + fw * 0.2)
+        cheek_left_y = int(fy + fh * 0.6)
+        cheek_right_x = int(fx + fw * 0.8)
+        cheek_right_y = int(fy + fh * 0.6)
+
+        # Feature points list
+        feature_points = [
+            (forehead_x, forehead_y, "F"),
+            (left_eye_x, left_eye_y, "E1"),
+            (right_eye_x, right_eye_y, "E2"),
+            (nose_x, nose_y, "N"),
+            (cheek_left_x, cheek_left_y, "C1"),
+            (cheek_right_x, cheek_right_y, "C2"),
+            (mouth_x, mouth_y, "M"),
+            (jaw_left_x, jaw_left_y, "J1"),
+            (jaw_right_x, jaw_right_y, "J2"),
+            (jaw_bottom_x, jaw_bottom_y, "J3"),
+        ]
+
+        # Draw face contour box (corner brackets only)
+        corner_len = 25
+        thickness = 2
+
+        # Top-left
+        cv2.line(frame, (fx, fy), (fx + corner_len, fy), bright_color, thickness)
+        cv2.line(frame, (fx, fy), (fx, fy + corner_len), bright_color, thickness)
+        # Top-right
+        cv2.line(frame, (fx + fw, fy), (fx + fw - corner_len, fy), bright_color, thickness)
+        cv2.line(frame, (fx + fw, fy), (fx + fw, fy + corner_len), bright_color, thickness)
+        # Bottom-left
+        cv2.line(frame, (fx, fy + fh), (fx + corner_len, fy + fh), bright_color, thickness)
+        cv2.line(frame, (fx, fy + fh), (fx, fy + fh - corner_len), bright_color, thickness)
+        # Bottom-right
+        cv2.line(frame, (fx + fw, fy + fh), (fx + fw - corner_len, fy + fh), bright_color, thickness)
+        cv2.line(frame, (fx + fw, fy + fh), (fx + fw, fy + fh - corner_len), bright_color, thickness)
+
+        # Draw feature connection lines (like neural network)
+        connections = [
+            (forehead_x, forehead_y, left_eye_x, left_eye_y),
+            (forehead_x, forehead_y, right_eye_x, right_eye_y),
+            (left_eye_x, left_eye_y, nose_x, nose_y),
+            (right_eye_x, right_eye_y, nose_x, nose_y),
+            (left_eye_x, left_eye_y, right_eye_x, right_eye_y),
+            (nose_x, nose_y, mouth_x, mouth_y),
+            (nose_x, nose_y, cheek_left_x, cheek_left_y),
+            (nose_x, nose_y, cheek_right_x, cheek_right_y),
+            (mouth_x, mouth_y, jaw_left_x, jaw_left_y),
+            (mouth_x, mouth_y, jaw_right_x, jaw_right_y),
+            (jaw_left_x, jaw_left_y, jaw_bottom_x, jaw_bottom_y),
+            (jaw_right_x, jaw_right_y, jaw_bottom_x, jaw_bottom_y),
+            (cheek_left_x, cheek_left_y, jaw_left_x, jaw_left_y),
+            (cheek_right_x, cheek_right_y, jaw_right_x, jaw_right_y),
+        ]
+
+        for x1, y1, x2, y2 in connections:
+            cv2.line(frame, (x1, y1), (x2, y2), dim_color, 1)
+
+        # Draw feature points (circles with labels)
+        for px, py, label in feature_points:
+            # Outer circle
+            cv2.circle(frame, (px, py), 8, bright_color, 1)
+            # Inner dot
+            cv2.circle(frame, (px, py), 3, bright_color, -1)
+            # Label
+            cv2.putText(frame, label, (px + 12, py - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, bright_color, 1)
+
+        # Draw crosshairs on eyes
+        for ex, ey, _ in [(left_eye_x, left_eye_y, "E1"), (right_eye_x, right_eye_y, "E2")]:
+            cross_size = 12
+            cv2.line(frame, (ex - cross_size, ey), (ex + cross_size, ey), bright_color, 1)
+            cv2.line(frame, (ex, ey - cross_size), (ex, ey + cross_size), bright_color, 1)
+
+        # Draw measurement lines
+        # Eye distance
+        cv2.line(frame, (left_eye_x, left_eye_y - 20), (right_eye_x, right_eye_y - 20), bright_color, 1)
+        mid_eye_x = (left_eye_x + right_eye_x) // 2
+        cv2.putText(frame, f"{fw}px", (mid_eye_x - 15, left_eye_y - 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, bright_color, 1)
+
+        # Face height measurement
+        cv2.line(frame, (fx + fw + 10, fy), (fx + fw + 10, fy + fh), bright_color, 1)
+        cv2.putText(frame, f"{fh}px", (fx + fw + 15, fy + fh // 2),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, bright_color, 1)
+
+        # Target label
+        cv2.putText(frame, "[TARGET ACQUIRED]", (fx, fy - 15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, bright_color, 1)
+
+        # Data readout
+        data_y = fy + fh + 20
+        cv2.putText(frame, f"ID: AGENT_{random.randint(1000,9999)}", (fx, data_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, bright_color, 1)
+        cv2.putText(frame, f"CONF: {random.randint(85,99)}%", (fx, data_y + 15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, bright_color, 1)
+
+    def run(self):
+        if not self.init_camera():
+            return
+
+        try:
+            import cv2
+            import numpy as np
+
+            # Load face cascade
+            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            face_cascade = cv2.CascadeClassifier(cascade_path)
+
+            while self.running and self.cap.isOpened():
+                ret, frame = self.cap.read()
+                if not ret:
+                    continue
+
+                # Flip frame horizontally (mirror effect)
+                frame = cv2.flip(frame, 1)
+
+                # Convert to grayscale for face detection
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                # Detect faces
+                faces = face_cascade.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+                )
+
+                face_x, face_y, face_w, face_h = 0, 0, 0, 0
+                face_detected = len(faces) > 0
+
+                if face_detected:
+                    # Get largest face
+                    largest = max(faces, key=lambda f: f[2] * f[3])
+                    face_x, face_y, face_w, face_h = largest
+                    self.face_detected.emit(True, face_x, face_y, face_w, face_h)
+                else:
+                    self.face_detected.emit(False, 0, 0, 0, 0)
+
+                # Draw line grid overlay
+                frame = self.draw_line_grid(frame, face_x, face_y, face_w, face_h)
+
+                # Convert to RGB for Qt
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+
+                self.frame_ready.emit(qt_image)
+
+                # Small delay
+                time.sleep(0.03)
+
+        except Exception as e:
+            print(f"Camera thread error: {e}")
+        finally:
+            if self.cap:
+                self.cap.release()
+
+    def stop(self):
+        self.running = False
+        if self.cap:
+            self.cap.release()
+
+# ============================================
+# CAMERA WIDGET - Small box in header
+# ============================================
+class CameraWidget(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(200, 150)  # Small size for header
+        self.setStyleSheet("""
+            QFrame {
+                background: #001a1a;
+                border: 2px solid #00ffaa;
+                border-radius: 4px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(0)
+
+        self.camera_label = QLabel("[CAMERA OFF]")
+        self.camera_label.setAlignment(Qt.AlignCenter)
+        self.camera_label.setFont(QFont("Consolas", 8))
+        self.camera_label.setStyleSheet("color: #008866; border: none; background: transparent;")
+        self.camera_label.setScaledContents(True)
+        layout.addWidget(self.camera_label)
+
+        self.scanner = None
+        self.camera_active = False
+
+    def start_camera(self):
+        if self.camera_active:
+            return
+        try:
+            import cv2
+            self.scanner = AgentFaceScanner()
+            self.scanner.frame_ready.connect(self.update_frame)
+            self.scanner.start()
+            self.camera_active = True
+        except ImportError:
+            self.camera_label.setText("[NO OPENCV]")
+            self.camera_label.setStyleSheet("color: #ff4444; border: none; background: transparent;")
+        except Exception as e:
+            self.camera_label.setText(f"[CAM ERR]")
+            print(f"Camera start error: {e}")
+
+    def stop_camera(self):
+        if self.scanner:
+            self.scanner.stop()
+            self.scanner = None
+        self.camera_active = False
+        self.camera_label.setText("[CAMERA OFF]")
+        self.camera_label.setStyleSheet("color: #008866; border: none; background: transparent;")
+        self.camera_label.setPixmap(QPixmap())
+
+    def update_frame(self, qt_image):
+        if qt_image and not qt_image.isNull():
+            scaled = qt_image.scaled(196, 146, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pixmap = QPixmap.fromImage(scaled)
+            self.camera_label.setPixmap(pixmap)
+
+# ============================================
+# BIN V7.4 - With Agent Face Line Scanner
+# ============================================
+class BIN_V74(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config = load_config()
@@ -301,7 +605,7 @@ class BIN_V73(QMainWindow):
         self.scanning = False
         self.scan_progress_val = 0
         self.live_scanner = None
-        self.tree_items = {}  # path -> QTreeWidgetItem mapping
+        self.tree_items = {}
 
         self.setWindowTitle("◈ BADAN INTELIJEN NEGARA V7.4 ◈")
         self.setMinimumSize(1600, 1000)
@@ -370,7 +674,8 @@ class BIN_V73(QMainWindow):
             }}
         """)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(30, 10, 30, 10)
+        layout.setContentsMargins(20, 5, 20, 5)
+        layout.setSpacing(15)
 
         badge = QLabel("◈")
         badge.setFont(QFont("Consolas", 36, QFont.Bold))
@@ -378,9 +683,19 @@ class BIN_V73(QMainWindow):
         layout.addWidget(badge)
 
         title = QLabel("BADAN INTELIJEN NEGARA V7.4")
-        title.setFont(QFont("Consolas", 28, QFont.Bold))
-        title.setStyleSheet(f"color: {self.colors['primary']}; letter-spacing: 5px;")
+        title.setFont(QFont("Consolas", 26, QFont.Bold))
+        title.setStyleSheet(f"color: {self.colors['primary']}; letter-spacing: 4px;")
         layout.addWidget(title)
+
+        layout.addStretch()
+
+        # Camera widget - small box in header
+        self.camera_widget = CameraWidget()
+        layout.addWidget(self.camera_widget)
+
+        if self.config.get("camera_enabled", True):
+            self.camera_widget.start_camera()
+
         layout.addStretch()
 
         self.path_label = QLabel("STANDBY")
@@ -485,12 +800,6 @@ class BIN_V73(QMainWindow):
         self.progress_bar.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.progress_bar)
 
-        self.scan_stats = QLabel()
-        self.scan_stats.setFont(QFont("Consolas", 11))
-        self.scan_stats.setStyleSheet(f"color: {self.colors['secondary']};")
-        self.scan_stats.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.scan_stats)
-
         return widget
 
     def create_browser_screen(self):
@@ -499,7 +808,6 @@ class BIN_V73(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        # Top info bar with LIVE indicator
         self.drive_info = QLabel()
         self.drive_info.setFont(QFont("Consolas", 13, QFont.Bold))
         self.drive_info.setStyleSheet(f"""
@@ -510,7 +818,6 @@ class BIN_V73(QMainWindow):
         """)
         layout.addWidget(self.drive_info)
 
-        # Live scanning indicator bar
         self.live_bar = QLabel("● LIVE SCANNING ACTIVE")
         self.live_bar.setFont(QFont("Consolas", 11, QFont.Bold))
         self.live_bar.setStyleSheet(f"""
@@ -521,7 +828,6 @@ class BIN_V73(QMainWindow):
         """)
         layout.addWidget(self.live_bar)
 
-        # Toolbar
         toolbar = QFrame()
         toolbar.setFixedHeight(45)
         toolbar.setStyleSheet(f"""
@@ -576,10 +882,8 @@ class BIN_V73(QMainWindow):
 
         layout.addWidget(toolbar)
 
-        # Splitter: Tree (left) + Right panel (small tree above live console)
         splitter = QSplitter(Qt.Horizontal)
 
-        # LEFT: Tree View
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["NAME", "TYPE", "SIZE", "STATUS", "SECURITY"])
         self.tree.setColumnWidth(0, 350)
@@ -622,24 +926,6 @@ class BIN_V73(QMainWindow):
 
         splitter.addWidget(self.tree)
 
-        # RIGHT: Panel containing a small tree above the live console
-        right_panel = QFrame()
-        right_panel.setStyleSheet(f"""
-            QFrame {{
-                background: {self.colors['panel']};
-                border: 1px solid {self.colors['secondary']};
-            }}
-        """)
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(10, 10, 10, 10)
-        right_layout.setSpacing(8)
-
-        # Small tree above console (mirror of left tree)
-        # Small tree above console (mirror of left tree) - use helper
-        self.right_tree = self.create_small_tree(max_height=120)
-        right_layout.addWidget(self.right_tree)
-
-        # Live console (restored size)
         self.console = QTextEdit()
         self.console.setFont(QFont("Consolas", 10))
         self.console.setStyleSheet(f"""
@@ -653,45 +939,12 @@ class BIN_V73(QMainWindow):
         self.console.setReadOnly(True)
         self.console.setPlaceholderText("Live scanning output...")
 
-        right_layout.addWidget(self.console)
-
-        splitter.addWidget(right_panel)
-        splitter.setSizes([700, 500])
+        splitter.addWidget(self.console)
+        splitter.setSizes([800, 600])
 
         layout.addWidget(splitter)
 
         return widget
-
-    def create_small_tree(self, max_height=120):
-        """Create a compact QTreeWidget (used above the live console)."""
-        tree = QTreeWidget()
-        tree.setHeaderLabels(["NAME", "TYPE", "SIZE", "STATUS", "SECURITY"])
-        tree.setColumnWidth(0, 350)
-        tree.setColumnWidth(1, 100)
-        tree.setColumnWidth(2, 90)
-        tree.setColumnWidth(3, 100)
-        tree.setColumnWidth(4, 120)
-        tree.setFont(QFont("Consolas", 11))
-        tree.setStyleSheet(f"""
-            QTreeWidget {{
-                background: {self.colors['panel']};
-                color: {self.colors['primary']};
-                border: none;
-            }}
-            QHeaderView::section {{
-                background: {self.colors['panel']};
-                color: {self.colors['primary']};
-                padding: 6px;
-                border: 1px solid {self.colors['secondary']};
-                font-weight: bold;
-            }}
-        """)
-        tree.setMaximumHeight(max_height)
-        tree.itemExpanded.connect(self.on_item_expanded)
-        tree.itemClicked.connect(self.on_item_clicked)
-        tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        tree.customContextMenuRequested.connect(self.show_context_menu)
-        return tree
 
     def create_empty_screen(self):
         widget = QFrame()
@@ -757,7 +1010,7 @@ class BIN_V73(QMainWindow):
             widget.setVisible(name == screen_name)
 
     # ============================================
-    # LIVE SCANNING - James Bond Effect
+    # LIVE SCANNING
     # ============================================
     def on_usb_inserted(self, drive_letter, volume_name):
         self.current_drive = drive_letter
@@ -774,14 +1027,12 @@ class BIN_V73(QMainWindow):
         self.scan_progress_val = 0
         self.scanning = True
 
-        # Start animation timer
         self.anim_timer = QTimer()
         self.anim_timer.timeout.connect(self.update_scan_animation)
         self.anim_timer.start(80)
 
         self.play_sound("detect")
 
-        # Start live scanner thread
         self.live_scanner = LiveScanner(drive_letter)
         self.live_scanner.file_found.connect(self.on_file_found)
         self.live_scanner.scan_progress.connect(self.on_scan_progress)
@@ -789,22 +1040,17 @@ class BIN_V73(QMainWindow):
         self.live_scanner.start()
 
     def on_file_found(self, path, name, file_type, size, status):
-        """Called when live scanner finds a file - add to tree immediately"""
-        # Add to console
         timestamp = time.strftime("%H:%M:%S")
         if file_type == "FOLDER":
             self.console.append(f"[{timestamp}] 📁 SCANNING DIR: {name}")
         else:
             self.console.append(f"[{timestamp}] 📄 FOUND: {name} | {file_type} | {size} | [{status}]")
 
-        # Auto-scroll console
         scrollbar = self.console.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-        # Add to tree (lazy - only add root level items, children on expand)
         drive_path = f"{self.current_drive}\\"
         if path == drive_path or os.path.dirname(path) == drive_path:
-            # Root level item
             item = QTreeWidgetItem(self.tree)
             if file_type == "FOLDER":
                 item.setText(0, f"📁 {name}")
@@ -813,7 +1059,7 @@ class BIN_V73(QMainWindow):
                 item.setText(3, "[DIR]")
                 item.setText(4, "PENDING")
                 item.setData(0, Qt.UserRole, path)
-                item.setData(1, Qt.UserRole, True)  # is_dir
+                item.setData(1, Qt.UserRole, True)
                 dummy = QTreeWidgetItem(item)
                 dummy.setText(0, "Loading...")
             else:
@@ -824,32 +1070,25 @@ class BIN_V73(QMainWindow):
                 item.setText(4, "VERIFIED")
                 item.setData(0, Qt.UserRole, path)
                 item.setData(1, Qt.UserRole, False)
-
             self.tree_items[path] = item
 
     def on_scan_progress(self, progress, message):
-        """Update progress bar and info"""
         self.scan_progress_val = progress
         self.scan_info.setText(message)
-
         filled = "█" * (progress // 2)
         empty = "░" * (35 - progress // 2)
         self.progress_bar.setText(f"[{filled}{empty}] {progress}%")
 
     def on_scan_complete(self):
-        """Initial scan complete - switch to browser but keep live"""
-        pass  # We switch to browser after a delay
+        pass
 
     def update_scan_animation(self):
-        """Continuous scanning animation"""
         self.scan_progress_val = (self.scan_progress_val + 1) % 100
 
         if self.scan_progress_val < 70:
-            # Initial scan phase
             dots = "." * ((self.scan_progress_val // 10) % 4)
             self.scan_title.setText(f"INITIATING SECURITY PROTOCOL{dots}")
         else:
-            # Switch to browser after initial scan
             if self.scanning:
                 self.scanning = False
                 self.show_screen("browser")
@@ -858,18 +1097,14 @@ class BIN_V73(QMainWindow):
 
                 self.drive_info.setText(
                     f"◈ DEVICE: {self.volume_name} ({self.current_drive})  |  "
-                    f"STATUS: LIVE SCANNING  |  "
-                    f"CLEARANCE: LEVEL 5"
+                    f"STATUS: LIVE SCANNING  |  CLEARANCE: LEVEL 5"
                 )
-
                 self.path_label.setText(f"PATH: {self.current_drive}\\")
                 self.play_sound("complete")
 
-            # Live monitoring animation
             dots = "." * ((self.scan_progress_val // 5) % 4)
             self.live_bar.setText(f"● LIVE SCANNING ACTIVE{dots}")
 
-            # Random console updates
             if self.scan_progress_val % 10 == 0:
                 timestamp = time.strftime("%H:%M:%S")
                 msgs = [
@@ -900,12 +1135,9 @@ class BIN_V73(QMainWindow):
             for item_name in items:
                 item_path = os.path.join(path, item_name)
                 is_dir = os.path.isdir(item_path)
-
                 if item_name.startswith('.') and not self.config.get("show_hidden", False):
                     continue
-
                 tree_item = QTreeWidgetItem(parent_item)
-
                 if is_dir:
                     tree_item.setText(0, f"📁 {item_name}")
                     tree_item.setText(1, "FOLDER")
@@ -922,7 +1154,6 @@ class BIN_V73(QMainWindow):
                         ext = Path(item_name).suffix.lower()
                         file_type = self.get_file_type_name(ext)
                         size = self.format_size(stat.st_size)
-
                         tree_item.setText(0, f"📄 {item_name}")
                         tree_item.setText(1, file_type)
                         tree_item.setText(2, size)
@@ -942,12 +1173,9 @@ class BIN_V73(QMainWindow):
     def on_item_clicked(self, item, column):
         path = item.data(0, Qt.UserRole)
         is_dir = item.data(1, Qt.UserRole)
-
         if not path:
             return
-
         self.current_selected = path
-
         if is_dir:
             self.console.append(f">> OPENED DIRECTORY: {os.path.basename(path)}")
         else:
@@ -955,28 +1183,8 @@ class BIN_V73(QMainWindow):
                 stat = os.stat(path)
                 ext = Path(path).suffix.lower()
                 file_type = self.get_file_type_name(ext)
-
-                info = (
-                    f"<b style='color:{self.colors['primary']};'>FILE DETAILS</b><br><br>"
-                    f"<b>Name:</b> {os.path.basename(path)}<br>"
-                    f"<b>Type:</b> {file_type}<br>"
-                    f"<b>Size:</b> {self.format_size(stat.st_size)}<br>"
-                    f"<b>Created:</b> {time.ctime(stat.st_ctime)}<br>"
-                    f"<b>Modified:</b> {time.ctime(stat.st_mtime)}<br>"
-                    f"<b>Path:</b> {path}<br><br>"
-                    f"<b>Status:</b> <span style='color:{self.colors['warn']};'>CLASSIFIED // EYES ONLY</span>"
-                )
-
-                if ext in ['.txt', '.md', '.json', '.xml', '.html', '.css', '.js', '.py']:
-                    try:
-                        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                            preview = f.read(500)
-                        info += f"<br><br><b>Preview:</b><br><pre style='color:{self.colors['secondary']};'>{preview[:300]}</pre>"
-                    except:
-                        pass
-
                 self.console.append(f">> SELECTED: {os.path.basename(path)} | {file_type} | {self.format_size(stat.st_size)}")
-            except Exception as e:
+            except:
                 pass
 
     def get_file_type_name(self, ext):
@@ -1148,6 +1356,11 @@ class BIN_V73(QMainWindow):
         sound_action.setChecked(self.config.get("sound_enabled", True))
         sound_action.triggered.connect(self.toggle_sound)
         tray_menu.addAction(sound_action)
+        camera_action = QAction("Face Scanner Camera", self)
+        camera_action.setCheckable(True)
+        camera_action.setChecked(self.config.get("camera_enabled", True))
+        camera_action.triggered.connect(self.toggle_camera)
+        tray_menu.addAction(camera_action)
         hidden_action = QAction("Show Hidden Files", self)
         hidden_action.setCheckable(True)
         hidden_action.setChecked(self.config.get("show_hidden", False))
@@ -1179,10 +1392,10 @@ class BIN_V73(QMainWindow):
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
         if checked:
             exe_path = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
-            winreg.SetValueEx(key, "BIN_V73", 0, winreg.REG_SZ, f'"{exe_path}"')
+            winreg.SetValueEx(key, "BIN_V74", 0, winreg.REG_SZ, f'"{exe_path}"')
         else:
             try:
-                winreg.DeleteValue(key, "BIN_V73")
+                winreg.DeleteValue(key, "BIN_V74")
             except:
                 pass
         winreg.CloseKey(key)
@@ -1190,6 +1403,14 @@ class BIN_V73(QMainWindow):
     def toggle_sound(self, checked):
         self.config["sound_enabled"] = checked
         save_config(self.config)
+
+    def toggle_camera(self, checked):
+        self.config["camera_enabled"] = checked
+        save_config(self.config)
+        if checked:
+            self.camera_widget.start_camera()
+        else:
+            self.camera_widget.stop_camera()
 
     def toggle_hidden(self, checked):
         self.config["show_hidden"] = checked
@@ -1250,6 +1471,14 @@ class BIN_V73(QMainWindow):
             self.refresh_tree()
         elif event.key() == Qt.Key_Delete:
             self.delete_selected()
+        elif event.key() == Qt.Key_Q:
+            # Stop camera and quit application when 'q' is pressed
+            try:
+                if hasattr(self, 'camera_widget') and self.camera_widget:
+                    self.camera_widget.stop_camera()
+            except Exception:
+                pass
+            self.quit_app()
         elif event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
             self.copy_selected()
         elif event.key() == Qt.Key_X and event.modifiers() == Qt.ControlModifier:
@@ -1260,6 +1489,8 @@ class BIN_V73(QMainWindow):
     def quit_app(self):
         if self.live_scanner:
             self.live_scanner.stop()
+        if self.camera_widget:
+            self.camera_widget.stop_camera()
         self.monitor.stop()
         self.tray.hide()
         QApplication.quit()
@@ -1282,5 +1513,5 @@ if __name__ == "__main__":
         QWidget { font-family: Consolas, monospace; }
         QToolTip { background: #11111f; color: #00ffaa; border: 1px solid #00ffaa; padding: 5px; }
     """)
-    window = BIN_V73()
+    window = BIN_V74()
     sys.exit(app.exec_())
